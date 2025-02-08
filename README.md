@@ -1,9 +1,10 @@
-# Cuda Boilerplate
+# Cuda Prefill Boilerplate based on Flashinfer
 
 # About
 
-This boilerplate creates one program that runs one nvidia cuda kernel
-comprised of a `complex_t` that is linked by device when built.
+This boilerplate creates one program that runs one prefill kernel,
+with tensors dumped from flashinfer indected as input after loading 
+from disk, and final result can be compared with reference.
 The idea is to have cuda code built and linked via nvcc and host/app
 code built with g++. We're using the separate compilation mode with
 nvcc, so the Makefile has an extra step that links the cuda code.

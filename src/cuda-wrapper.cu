@@ -1780,17 +1780,16 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVC
 
 
 void call_it() {
-	printf("HELLO!");
+ printf("\nLoad Tensors and Run Prefill here...\n");
 
-
+#if 0
 using Params = BatchPrefillPagedParams<half, half, half, int32_t>;
-
 using AttentionVariant1 = DefaultAttention<true, /*use_sliding_window=*/true, /*use_logits_soft_cap=*/false, /*use_alibi_bias=*/false>;
-
 template cudaError_t BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0, MaskMode::kCustom, AttentionVariant1, Params>(
     Params params,
     half* tmp_v,
     float* tmp_s, cudaStream_t stream);
+#endif
 
 }
 

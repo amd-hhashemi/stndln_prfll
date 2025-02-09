@@ -14,7 +14,7 @@
 #include "page.cuh"
 #include "permuted_smem.cuh"
 #include "pos_enc.cuh"
-#include "utils.cuh"
+//#include "utils.cuh"
 #include "cascade.cuh"
 #include "mask.cuh"
 #include "variants.cuh"
@@ -488,7 +488,7 @@ __device__ __forceinline__ void mma_sync_m16n16k16_row_col_f16f16f32(float* C, u
                                                                      uint32_t* B) {
 #if defined(FLASHINFER_MMA_F16F16F32_M16N8K16_ENABLED)
   if constexpr (mma_mode == MMAMode::kInit) {
-    if constexpr (std::is_same<T, half>::value) {
+    if constexpr (std::is_same_v<T, half>) {
       asm volatile(
           "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
           "{%0,  %1,  %2,  %3},"
@@ -528,7 +528,7 @@ __device__ __forceinline__ void mma_sync_m16n16k16_row_col_f16f16f32(float* C, u
             "f"(0.f), "f"(0.f));
     }
   } else {
-    if constexpr (std::is_same<T, half>::value) {
+    if constexpr (std::is_same_v<T, half>) {
       asm volatile(
           "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
           "{%0,  %1,  %2,  %3},"
@@ -569,7 +569,7 @@ __device__ __forceinline__ void mma_sync_m16n16k16_row_col_f16f16f32(float* C, u
     }
   }
 #elif defined(FLASHINFER_MMA_F16F16F32_M16N8K8_ENABLED)
-  if constexpr (std::is_same<T, half>::value) {
+  if constexpr (std::is_same_v<T, half>) {
     if constexpr (mma_mode == MMAMode::kInit) {
       asm volatile(
           "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
@@ -691,20 +691,20 @@ __device__ __forceinline__ void compute_qk(
 
 #pragma unroll
       for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
-        if constexpr (std::is_same<typename KTraits::DTypeQKAccum, float>::value) {
+        if constexpr (std::is_same_v<typename KTraits::DTypeQKAccum, float>) {
           if (mma_d == 0) {
-            mma::mma_sync_m16n16k16_row_col_f16f16f32<typename KTraits::DTypeQ, MMAMode::kInit>(
+            mma_sync_m16n16k16_row_col_f16f16f32<typename KTraits::DTypeQ, MMAMode::kInit>(
                 s_frag[mma_q][mma_kv], a_frag[mma_q], b_frag);
           } else {
-            mma::mma_sync_m16n16k16_row_col_f16f16f32<typename KTraits::DTypeQ>(
+            mma_sync_m16n16k16_row_col_f16f16f32<typename KTraits::DTypeQ>(
                 s_frag[mma_q][mma_kv], a_frag[mma_q], b_frag);
           }
-        } else if (std::is_same<typename KTraits::DTypeQKAccum, half>::value) {
+        } else if (std::is_same_v<typename KTraits::DTypeQKAccum, half>) {
           if (mma_d == 0) {
-            mma::mma_sync_m16n16k16_row_col_f16f16f16<MMAMode::kInit>(
+            mma_sync_m16n16k16_row_col_f16f16f16<MMAMode::kInit>(
                 (uint32_t*)s_frag[mma_q][mma_kv], a_frag[mma_q], b_frag);
           } else {
-            mma::mma_sync_m16n16k16_row_col_f16f16f16((uint32_t*)s_frag[mma_q][mma_kv],
+            mma_sync_m16n16k16_row_col_f16f16f16((uint32_t*)s_frag[mma_q][mma_kv],
                                                       a_frag[mma_q], b_frag);
           }
         }
@@ -1274,7 +1274,7 @@ __device__ __forceinline__ void compute_sfm_v(
   constexpr uint32_t UPCAST_HEAD_DIM_V = KTraits::UPCAST_HEAD_DIM_V;
 
   typename KTraits::DTypeQ s_frag_f16[KTraits::NUM_MMA_Q][KTraits::NUM_MMA_KV][8];
-  if constexpr (std::is_same<typename KTraits::DTypeQKAccum, float>::value) {
+  if constexpr (std::is_same_v<typename KTraits::DTypeQKAccum, float>) {
 #pragma unroll
     for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
 #pragma unroll
@@ -1290,7 +1290,7 @@ __device__ __forceinline__ void compute_sfm_v(
     for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
 #pragma unroll
       for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
-        if constexpr (std::is_same<typename KTraits::DTypeQKAccum, float>::value) {
+        if constexpr (std::is_same_v<typename KTraits::DTypeQKAccum, float>) {
           mma::m16k16_rowsum_f16f16f32(d[mma_q], s_frag_f16[mma_q][mma_kv]);
         } else {
           mma::m16k16_rowsum_f16f16f32(d[mma_q], s_frag[mma_q][mma_kv]);
@@ -1321,7 +1321,7 @@ __device__ __forceinline__ void compute_sfm_v(
       }
 #pragma unroll
       for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
-        if constexpr (std::is_same<typename KTraits::DTypeQKAccum, float>::value) {
+        if constexpr (std::is_same_v<typename KTraits::DTypeQKAccum, float>) {
           mma::mma_sync_m16n16k16_row_col_f16f16f32<typename KTraits::DTypeQ>(
               o_frag[mma_q][mma_d], (uint32_t*)s_frag_f16[mma_q][mma_kv], b_frag);
         } else {
@@ -1357,7 +1357,7 @@ __device__ __forceinline__ void update_mdo_states(
   constexpr bool use_softmax = AttentionVariant::use_softmax;
 
   if constexpr (use_softmax) {
-    if constexpr (std::is_same<DTypeQKAccum, float>::value) {
+    if constexpr (std::is_same_v<DTypeQKAccum, float>) {
 #pragma unroll
       for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
 #pragma unroll
@@ -1395,7 +1395,7 @@ __device__ __forceinline__ void update_mdo_states(
           }
         }
       }
-    } else if constexpr (std::is_same<DTypeQKAccum, half>::value) {
+    } else if constexpr (std::is_same_v<DTypeQKAccum, half>) {
 #pragma unroll
       for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
         half m_prev[2];
@@ -1779,19 +1779,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVC
 }
 
 
-void call_it() {
- printf("\nLoad Tensors and Run Prefill here...\n");
 
-#if 0
-using Params = BatchPrefillPagedParams<half, half, half, int32_t>;
-using AttentionVariant1 = DefaultAttention<true, /*use_sliding_window=*/true, /*use_logits_soft_cap=*/false, /*use_alibi_bias=*/false>;
-template cudaError_t BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0, MaskMode::kCustom, AttentionVariant1, Params>(
-    Params params,
-    half* tmp_v,
-    float* tmp_s, cudaStream_t stream);
-#endif
-
-}
 
 template <uint32_t CTA_TILE_Q, uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO,
           PosEncodingMode POS_ENCODING_MODE, bool USE_FP16_QK_REDUCTION, MaskMode MASK_MODE,
@@ -1820,7 +1808,7 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
   constexpr uint32_t NUM_MMA_D_QK = HEAD_DIM_QK / 16;
   constexpr uint32_t NUM_MMA_D_VO = HEAD_DIM_VO / 16;
   using DTypeQKAccum =
-      typename std::conditional<USE_FP16_QK_REDUCTION && std::is_same<DTypeQ, half>::value, half,
+      typename std::conditional<USE_FP16_QK_REDUCTION && std::is_same_v<DTypeQ, half>, half,
                                 float>::type;
 
   int dev_id = 0;
@@ -1857,7 +1845,7 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
               << " NUM_WARPS_KV=" << NUM_WARPS_KV
               << " please create an issue (https://github.com/flash-infer-ai/flash-infer/issues)"
                  " and report the issue to the developers.";
-      FLASHINFER_ERROR(err_msg.str());
+      //FLASHINFER_ERROR(err_msg.str());
     } else {
       size_t smem_size = sizeof(typename KTraits::SharedStorage);
 
@@ -1896,5 +1884,31 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
   });
   return cudaSuccess;
 }
+
+void call_it() {
+ printf("\nLoad Tensors and Run Prefill here...\n");
+
+  //TestBatchPagedPrefillKernelOneHotCorrectness<half>(false);
+
+using Params = BatchPrefillPagedParams<half, half, half, int32_t>;
+Params pM;
+using AttentionVariant1 = DefaultAttention<true, /*use_sliding_window=*/true, /*use_logits_soft_cap=*/false, /*use_alibi_bias=*/false>;
+AttentionVariant1 A10();
+
+cudaStream_t myStream;
+
+#if 1
+BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0, MaskMode::kCustom, AttentionVariant1, Params>(
+    pM, 
+    //half* tmp_v,
+    NULL, NULL,
+    //float* tmp_s,
+    myStream);
+#endif
+ printf("\nCompleted...\n");
+
+}
+
+
 
 

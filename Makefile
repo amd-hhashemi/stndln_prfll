@@ -3,7 +3,7 @@ CXXFLAGS=-std=c++17
 SRC_DIR=src
 NVCC=nvcc
 BUILD_DIR=build
-NVCC_FLAGS=-arch=sm_80 -rdc=true
+NVCC_FLAGS=-arch=sm_80 -rdc=true -std=c++17
 INCLUDES=-I/usr/local/cuda/include
 LINKS=-L/usr/local/cuda/lib64 -lcuda -lcudart
 CUDA_LINK_OBJECTS=$(BUILD_DIR)/cuda-wrapper.o $(BUILD_DIR)/complex_t.o

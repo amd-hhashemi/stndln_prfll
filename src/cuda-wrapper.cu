@@ -1529,7 +1529,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVC
     const uint_fastdiv& group_size = params.group_size;
 
 
-    //printf("HERE");
+    printf("in kernel!");
 
     static_assert(sizeof(DTypeQ) == 2);
     static_assert(sizeof(DTypeO) == 2);
@@ -1868,6 +1868,7 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
         params.o = tmp_v;
         params.lse = tmp_s;
         void* args[] = {(void*)&params};
+	printf("dispatching with %d,%d,%d", nthrs, nblks, smem_size); 
         FLASHINFER_CUDA_CALL(
             cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
         if constexpr (AttentionVariant::use_softmax) {
@@ -2078,7 +2079,8 @@ AttentionVariant1 A10();
   }
 
 
-   
+//#include<torch/troch.h>
+//  void* float_buffer_ptr = static_cast<void*>(troch::load("float_workspace_buffer.pt").data_ptr());
   void* float_buffer_ptr = static_cast<void*>(loadfromfile("float_workspace_buffer.bin"));// float_workspace_buffer.data_ptr());
   void* int_buffer_ptr = static_cast<void*>(loadfromfile("int_workspace_buffer.bin"));// int_workspace_buffer.data_ptr());
 
@@ -2170,6 +2172,12 @@ cudaStream_t myStream;
            //half* tmp_v, float* tmp_s,
            tmp_v, tmp_s, //no kv_partition for now
            myStream);
+
+	DTypeO* ref_output = (DTypeO*)loadfromfile("after_o.bin");
+
+	if (ref_output[0] != params.o[0])
+		printf("missmatch!!!!");
+
 #if 0
         DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {
           status = BatchPrefillWithPagedKVCacheDispatched<

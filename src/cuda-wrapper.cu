@@ -1488,6 +1488,7 @@ __device__ __forceinline__ void logits_mask(
 template <typename KTraits, typename Params>
 __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVCacheKernel(
     const __grid_constant__ Params params) {
+    printf("\nin kernel!\n");
    using DTypeQ = typename Params::DTypeQ;
     using DTypeKV = typename Params::DTypeKV;
     using DTypeO = typename Params::DTypeO;
@@ -1529,7 +1530,6 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVC
     const uint_fastdiv& group_size = params.group_size;
 
 
-    printf("in kernel!");
 
     static_assert(sizeof(DTypeQ) == 2);
     static_assert(sizeof(DTypeO) == 2);
@@ -1849,7 +1849,7 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
     } else {
       size_t smem_size = sizeof(typename KTraits::SharedStorage);
 
-      std::cout << "Params:" << typeid(Params).name() << "\n";
+      //std::cout << "Params:" << typeid(Params).name() << "\n";
 
 
       auto kernel = BatchPrefillWithPagedKVCacheKernel<KTraits, Params>;
@@ -1970,9 +1970,9 @@ struct PrefillPlanInfo {
 void* loadfromfile(std::string filename) {
     //std::string filename = "float_workspace_buffer.bin";
     std::vector<int> data_array;
-    int temp_data;
+    char temp_data;
     std::ifstream input_file(filename, std::ios::binary);
-    printf("%s", filename);
+    //printf("%s", filename);
     if (!input_file.is_open()) {
         std::cout << "\nError opening file: " << filename << std::endl;
         return nullptr;
@@ -2023,7 +2023,7 @@ std::vector<int64_t> plan_info_vec;
     const char* filename = "plan_info_vec.txt";
     FILE* file = fopen(filename, "r");
     if (file == nullptr) {
-        printf("Error opening file");
+        printf("Error opening file\n");
         exit(EXIT_FAILURE);
     }
     int num;
@@ -2031,7 +2031,7 @@ std::vector<int64_t> plan_info_vec;
         plan_info_vec.push_back(num);
     }
     if (ferror(file)) {
-        printf("Error reading file");
+        printf("Error reading file\n");
         fclose(file);
         exit(EXIT_FAILURE);
     }
@@ -2071,16 +2071,16 @@ AttentionVariant1 A10();
     num_kv_heads = paged_k_cache_size_2_;
   }
 
-  bool maybe_lse = false;
+  bool maybe_lse = true; //have lse
   if (maybe_lse) {
-    //const auto& lse = *maybe_lse;
+    //const auto& lse = loadfromfile("maybe_lse.bin");//*maybe_lse;
     //TORCH_CHECK(lse_size_0_ == q_size_0_, lse_size_0_, q_size_0_);
     //TORCH_CHECK(lse_size_1_ == q_size_1_, lse_size_1_, q_size_1_);
   }
 
 
-//#include<torch/troch.h>
-//  void* float_buffer_ptr = static_cast<void*>(troch::load("float_workspace_buffer.pt").data_ptr());
+//#include <torch/torch.h>
+//  void* float_buffer_ptr = static_cast<void*>(torch::load("float_workspace_buffer.pt").data_ptr());
   void* float_buffer_ptr = static_cast<void*>(loadfromfile("float_workspace_buffer.bin"));// float_workspace_buffer.data_ptr());
   void* int_buffer_ptr = static_cast<void*>(loadfromfile("int_workspace_buffer.bin"));// int_workspace_buffer.data_ptr());
 

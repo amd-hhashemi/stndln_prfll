@@ -1944,7 +1944,7 @@ struct PrefillPlanInfo {
   void FromVector(const std::vector<int64_t>& vec) {
     if (vec.size() != 15) {
       std::ostringstream err_msg;
-      err_msg << "PrefillPlanInfo::FromVector: vec.size() should be 14, but got " << vec.size();
+      std::cout << "PrefillPlanInfo::FromVector: vec.size() should be 14, but got " << vec.size();
       FLASHINFER_ERROR(err_msg.str());
     }
     padded_batch_size = vec[0];
@@ -1994,6 +1994,323 @@ T* GetPtrFromBaseOffset(void* base_ptr, int64_t offset) {
   return reinterpret_cast<T*>(reinterpret_cast<char*>(base_ptr) + offset);
 }
 
+#if 1
+
+#include "aot_default_additional_params.h"
+#include "aot_extension_utils.h"
+
+using IdType = int32_t;
+
+#define ADDITIONAL_FUNC_PARAMS BATCH_PREFILL_ADDITIONAL_FUNC_PARAMS
+#define ADDITIONAL_PARAMS_SETTER BATCH_PREFILL_ADDITIONAL_PARAMS_SETTER
+
+#define DISPATCH_context(DTypeQ, DTypeKV, DTypeO, IdType, MASK_MODE, HEAD_DIM_QK, HEAD_DIM_VO,    \
+                         POS_ENCODING_MODE, USE_SLIDING_WINDOW, USE_LOGITS_SOFT_CAP,              \
+                         USE_FP16_QK_REDUCTION, AttentionVariant, RaggedParams, PagedParams, ...) \
+  {                                                                                               \
+    DISPATCH_mask_mode(mask_mode, MASK_MODE, [&] {                                                \
+      return DISPATCH_PYTORCH_QKV_DTYPE_TO_CTYPE(                                                 \
+          q_scalar_type, kv_scalar_type, DTypeQ, DTypeKV, [&] {                                   \
+            using DTypeO = DTypeQ;                                                                \
+            using RaggedParams = BatchPrefillRaggedParams<DTypeQ, DTypeKV, DTypeO, IdType>;       \
+            using PagedParams = BatchPrefillPagedParams<DTypeQ, DTypeKV, DTypeO, IdType>;         \
+            constexpr auto POS_ENCODING_MODE = PosEncodingMode::kNone;                            \
+            constexpr bool USE_FP16_QK_REDUCTION = false;                                         \
+            constexpr bool use_custom_mask = MASK_MODE == MaskMode::kCustom;                      \
+            return DISPATCH_head_dim(head_dim_qk, HEAD_DIM_QK, [&] {                              \
+              [[maybe_unused]] constexpr int HEAD_DIM_VO = HEAD_DIM_QK;                                            \
+              return DISPATCH_BOOL(window_left > -1, USE_SLIDING_WINDOW, [&] {                    \
+                return DISPATCH_BOOL(logits_soft_cap > 0.f, USE_LOGITS_SOFT_CAP, [&] {            \
+                  using AttentionVariant =                                                        \
+                      DefaultAttention</*use_custom_mask=*/use_custom_mask, USE_SLIDING_WINDOW,   \
+                                       USE_LOGITS_SOFT_CAP, /*use_alibi_bias=*/false>;            \
+                  __VA_ARGS__();                                                                  \
+                  return true;                                                                    \
+                });                                                                               \
+              });                                                                                 \
+            });                                                                                   \
+          });                                                                                     \
+    });                                                                                           \
+  }
+
+
+void BatchPrefillWithPagedKVCacheRun(
+    at::Tensor float_workspace_buffer, at::Tensor int_workspace_buffer,
+    std::vector<int64_t> plan_info_vec, at::Tensor q, at::Tensor paged_k_cache,
+    at::Tensor paged_v_cache, at::Tensor qo_indptr, at::Tensor paged_kv_indptr,
+    at::Tensor paged_kv_indices, at::Tensor paged_kv_last_page_len, at::Tensor o,
+    std::optional<at::Tensor> maybe_lse, unsigned int mask_mode_code, unsigned int layout,
+    int32_t window_left /*ADDITIONAL_FUNC_PARAMS*/, int64_t cuda_stream) {
+
+using DTypeQ = half;
+using DTypeKV = half;
+using DTypeO = half;
+using IdType = int32_t;
+
+      
+
+
+  PrefillPlanInfo plan_info;
+  plan_info.FromVector(plan_info_vec);
+  QKVLayout kv_layout = static_cast<QKVLayout>(layout);
+  
+  auto device = q.device();
+  int64_t batch_size = paged_kv_indptr.size(0) - 1;
+  int64_t num_qo_heads = q.size(1);
+  int64_t num_kv_heads, page_size;
+  uint32_t head_dim_qk = q.size(2);
+  if (kv_layout == QKVLayout::kHND) {
+    num_kv_heads = paged_k_cache.size(1);
+    page_size = paged_k_cache.size(2);
+  } else {
+    page_size = paged_k_cache.size(1);
+    num_kv_heads = paged_k_cache.size(2);
+  }
+
+  if (maybe_lse) {
+    const auto& lse = *maybe_lse;
+    TORCH_CHECK(lse.size(0) == q.size(0), lse.size(0), q.size(0));
+    TORCH_CHECK(lse.size(1) == q.size(1), lse.size(1), q.size(1));
+  }
+
+  void* float_buffer_ptr = static_cast<void*>(float_workspace_buffer.data_ptr());
+  void* int_buffer_ptr = static_cast<void*>(int_workspace_buffer.data_ptr());
+
+  const MaskMode mask_mode = static_cast<MaskMode>(mask_mode_code);
+  auto q_scalar_type = q.scalar_type();
+  auto kv_scalar_type = paged_k_cache.scalar_type();
+
+  // get q_stride_n and q_stride_h
+  const auto q_stride_n = q.stride(0);
+  const auto q_stride_h = q.stride(1);
+
+  // get kv_cache_strides
+  const int64_t* kv_cache_strides = nullptr;
+  auto k_strides = paged_k_cache.strides();
+  auto v_strides = paged_v_cache.strides();
+  TORCH_CHECK(k_strides == v_strides, "k/v strides must be identical");
+  kv_cache_strides = k_strides.data();
+
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(cuda_stream);
+printf("\n--- Entering Kernel---\n");
+
+  DISPATCH_context(
+      DTypeQ, DTypeKV, DTypeO, IdType, MASK_MODE, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
+      USE_SLIDING_WINDOW, USE_LOGITS_SOFT_CAP, USE_FP16_QK_REDUCTION, AttentionVariant,
+      RaggedParams, PagedParams, [&] {
+        PagedParams params;
+
+        params.q = static_cast<DTypeQ*>(q.data_ptr());
+        paged_kv_t<DTypeKV, IdType> paged_kv(
+            num_kv_heads, page_size, HEAD_DIM_VO, batch_size, kv_layout,
+            static_cast<DTypeKV*>(paged_k_cache.data_ptr()),
+            static_cast<DTypeKV*>(paged_v_cache.data_ptr()), kv_cache_strides,
+            static_cast<IdType*>(paged_kv_indices.data_ptr()),
+            static_cast<IdType*>(paged_kv_indptr.data_ptr()),
+            static_cast<IdType*>(paged_kv_last_page_len.data_ptr()));
+        params.paged_kv = paged_kv;
+        params.q_indptr = static_cast<IdType*>(qo_indptr.data_ptr());
+        params.o = static_cast<DTypeO*>(o.data_ptr());
+
+        params.lse = maybe_lse ? static_cast<float*>(maybe_lse->data_ptr()) : nullptr;
+        params.num_qo_heads = num_qo_heads;
+        params.group_size = uint_fastdiv(num_qo_heads / paged_kv.num_heads);
+        params.q_stride_n = q_stride_n;
+        params.q_stride_h = q_stride_h;
+        params.window_left = window_left;
+
+        params.request_indices = nullptr;
+        params.qo_tile_indices = nullptr;
+        params.kv_tile_indices = nullptr;
+        params.merge_indptr = nullptr;
+        params.o_indptr = nullptr;
+        params.kv_chunk_size_ptr = nullptr;
+        params.block_valid_mask = nullptr;
+        params.total_num_rows = nullptr;
+        params.max_total_num_rows = 0;
+        params.padded_batch_size = 0;
+        params.partition_kv = false;
+
+        ADDITIONAL_PARAMS_SETTER
+
+        DTypeO* tmp_v = nullptr;
+        float* tmp_s = nullptr;
+
+        params.request_indices =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.request_indices_offset);
+        params.qo_tile_indices =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.qo_tile_indices_offset);
+        params.kv_tile_indices =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.kv_tile_indices_offset);
+        params.o_indptr = GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.o_indptr_offset);
+        params.kv_chunk_size_ptr =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.kv_chunk_size_ptr_offset);
+        if (plan_info.split_kv) {
+          params.merge_indptr =
+              GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.merge_indptr_offset);
+          tmp_v = GetPtrFromBaseOffset<DTypeO>(float_buffer_ptr, plan_info.v_offset);
+          tmp_s = GetPtrFromBaseOffset<float>(float_buffer_ptr, plan_info.s_offset);
+          if (plan_info.enable_cuda_graph) {
+            params.block_valid_mask =
+                GetPtrFromBaseOffset<bool>(int_buffer_ptr, plan_info.block_valid_mask_offset);
+          }
+        }
+        params.padded_batch_size = plan_info.padded_batch_size;
+        params.max_total_num_rows = plan_info.total_num_rows;
+        if (plan_info.enable_cuda_graph) {
+          params.total_num_rows =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.total_num_rows_offset);
+        }
+
+        cudaError_t status = cudaSuccess;
+
+        DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {
+          status = BatchPrefillWithPagedKVCacheDispatched<
+              CTA_TILE_Q, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
+              /*use_fp16_qk_reduction=*/USE_FP16_QK_REDUCTION, MASK_MODE, AttentionVariant,
+              PagedParams>(params, tmp_v, tmp_s, stream);
+        });
+printf("\n--- Exiting Kernel---\n");
+
+        //TORCH_CHECK(status == cudaSuccess, "BatchPrefillWithPagedKVCache failed with error ",
+        //            cudaGetErrorString(status));
+        return true;
+      });
+}
+
+#endif 
+
+#define LOD_FROM_PT
+#ifdef LOD_FROM_PT
+#include <torch/torch.h>
+
+#include <torch/script.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+
+void lodVec(const char* filename, std::vector<int64_t>* plan_info_vec) { 
+    FILE* file = fopen(filename, "r");
+    if (file == nullptr) {
+        printf("Error opening file\n");
+        exit(EXIT_FAILURE);
+    }
+    int num;
+    while (fscanf(file, "%d", &num) == 1) {
+        plan_info_vec->push_back(num);
+    }
+    if (ferror(file)) {
+        printf("Error reading file\n");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+    fclose(file);
+}
+
+
+void lodFromPt(std::string filename, torch::Tensor* retTens) {
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "Could not open file" << std::endl;
+    }
+
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<char> buffer(size);
+    if (!file.read(buffer.data(), size)) {
+         std::cerr << "Error while reading the file" << std::endl;
+    }
+
+    torch::IValue data = torch::pickle_load(buffer);
+
+    if (data.isTensor()) {
+        *retTens = data.toTensor();
+        //std::cout << "Tensor loaded successfully with shape: " << tensor.sizes() << std::endl;
+    } else {
+        std::cerr << "Loaded data is not a tensor." << std::endl;
+    }
+
+}
+
+
+torch::Tensor lodFromPt(std::string filename) {
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "Could not open file" << std::endl;
+        return torch::empty({0});
+    }
+
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<char> buffer(size);
+    if (!file.read(buffer.data(), size)) {
+         std::cerr << "Error while reading the file" << std::endl;
+	 return torch::empty({0});
+    }
+
+    torch::IValue data = torch::pickle_load(buffer);
+
+    if (data.isTensor()) {
+        return data.toTensor();
+        //std::cout << "Tensor loaded successfully with shape: " << tensor.sizes() << std::endl;
+    } else {
+        std::cerr << "Loaded data is not a tensor." << std::endl;
+    }
+
+}
+
+
+void call_it() {
+ printf("\nLoad Tensors and Run Prefill here...\n");
+
+//from flashinfer run...
+using DTypeQ = half;
+using DTypeKV = half;
+using DTypeO = half;
+using IdType = int32_t;
+torch::Tensor float_workspace_buffer; lodFromPt("float_workspace_buffer.pt", &float_workspace_buffer);
+torch::Tensor int_workspace_buffer; lodFromPt("int_workspace_buffer.pt", &int_workspace_buffer);
+torch::Tensor q; lodFromPt("q.pt", &q);
+torch::Tensor paged_k_cache;  lodFromPt("paged_k_cache.pt", &paged_k_cache);
+torch::Tensor paged_v_cache; lodFromPt("paged_v_cache.pt", &paged_v_cache);
+torch::Tensor qo_indptr; lodFromPt("qo_indptr.pt", &qo_indptr);
+torch::Tensor paged_kv_indptr; lodFromPt("paged_kv_indptr.pt", &paged_kv_indptr);
+torch::Tensor paged_kv_indices; lodFromPt("paged_kv_indices.pt", &paged_kv_indices);
+torch::Tensor paged_kv_last_page_len; lodFromPt("paged_kv_last_page_len.pt", &paged_kv_last_page_len);
+torch::Tensor o; lodFromPt("o.pt", &o);
+torch::Tensor maybe_lse; lodFromPt("maybe_lse.pt", &maybe_lse);
+int mask_mode_code = 0;
+int layout= 1;
+int window_left = -1;
+/*float logits_soft_cap= 0.0;
+float sm_scale =  0.08838834764831843;
+float rope_scale =  1.0;
+float rope_theta = 10000.0;*/
+torch::Tensor after_o; lodFromPt("after_o.pt", &after_o);
+
+std::vector<int64_t> plan_info_vec;
+lodVec("plan_info_vec.txt", &plan_info_vec);
+std::cout << "plan value 0" << plan_info_vec[0];
+
+cudaStream_t myStream;
+cudaStreamCreate(&myStream);
+
+printf("\n--- Done loading ---\n");
+
+BatchPrefillWithPagedKVCacheRun(float_workspace_buffer, int_workspace_buffer,
+    plan_info_vec, q, paged_k_cache,
+    paged_v_cache, qo_indptr, paged_kv_indptr,
+    paged_kv_indices, paged_kv_last_page_len, o,
+    maybe_lse, mask_mode_code, layout,
+    window_left, /*ADDITIONAL_FUNC_PARAMS,*/ reinterpret_cast<int64_t>(myStream)); 
+
+printf("\n--- Done running ---\n");
+
+}
+
+#else
 
 void call_it() {
  printf("\nLoad Tensors and Run Prefill here...\n");
@@ -2051,7 +2368,7 @@ int HEAD_DIM_VO = 128; //from test
 
 
 using AttentionVariant1 = DefaultAttention<true, /*use_sliding_window=*/true, /*use_logits_soft_cap=*/false, /*use_alibi_bias=*/false>;
-AttentionVariant1 A10();
+//AttentionVariant1 A10();
 
   PrefillPlanInfo plan_info;
   plan_info.FromVector(plan_info_vec);
@@ -2078,9 +2395,12 @@ AttentionVariant1 A10();
     //TORCH_CHECK(lse_size_1_ == q_size_1_, lse_size_1_, q_size_1_);
   }
 
+//#include <ATen/ATen.h>
+//#include <ATen/cuda/CUDAContext.h>
+
 
 //#include <torch/torch.h>
-//  void* float_buffer_ptr = static_cast<void*>(torch::load("float_workspace_buffer.pt").data_ptr());
+  //void* float_buffer_ptr = static_cast<void*>(torch::load("float_workspace_buffer.pt").data_ptr());
   void* float_buffer_ptr = static_cast<void*>(loadfromfile("float_workspace_buffer.bin"));// float_workspace_buffer.data_ptr());
   void* int_buffer_ptr = static_cast<void*>(loadfromfile("int_workspace_buffer.bin"));// int_workspace_buffer.data_ptr());
 
@@ -2188,7 +2508,6 @@ cudaStream_t myStream;
 #endif
 
 
-
 #if 0 
 BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0, MaskMode::kCustom, AttentionVariant1, Params>(
     params, 
@@ -2199,7 +2518,7 @@ BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0,
  printf("\nCompleted...\n");
 
 }
-
+#endif
 
 
 

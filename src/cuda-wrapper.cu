@@ -1885,24 +1885,307 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
   return cudaSuccess;
 }
 
+
+struct PrefillPlanInfo {
+  int64_t padded_batch_size;
+  int64_t total_num_rows;
+  int64_t total_num_rows_offset;
+  int64_t cta_tile_q;
+  int64_t request_indices_offset;
+  int64_t qo_tile_indices_offset;
+  int64_t kv_tile_indices_offset;
+  int64_t merge_indptr_offset;
+  int64_t o_indptr_offset;
+  int64_t kv_chunk_size_ptr_offset;
+  int64_t v_offset;
+  int64_t s_offset;
+  int64_t block_valid_mask_offset;
+  bool enable_cuda_graph;
+  bool split_kv;
+
+  PrefillPlanInfo()
+      : padded_batch_size(0),
+        total_num_rows(0),
+        total_num_rows_offset(0),
+        cta_tile_q(0),
+        request_indices_offset(0),
+        qo_tile_indices_offset(0),
+        kv_tile_indices_offset(0),
+        merge_indptr_offset(0),
+        o_indptr_offset(0),
+        kv_chunk_size_ptr_offset(0),
+        v_offset(0),
+        s_offset(0),
+        block_valid_mask_offset(0),
+        enable_cuda_graph(false),
+        split_kv(false) {}
+
+  // convert PrefillPlanInfo to std::vector<int64_t>
+  std::vector<int64_t> ToVector() const {
+    return {padded_batch_size,
+            total_num_rows,
+            total_num_rows_offset,
+            cta_tile_q,
+            request_indices_offset,
+            qo_tile_indices_offset,
+            kv_tile_indices_offset,
+            merge_indptr_offset,
+            o_indptr_offset,
+            kv_chunk_size_ptr_offset,
+            v_offset,
+            s_offset,
+            block_valid_mask_offset,
+            enable_cuda_graph,
+            split_kv};
+  }
+
+  // From std::vector<int64_t> to PrefillPlanInfo
+  void FromVector(const std::vector<int64_t>& vec) {
+    if (vec.size() != 15) {
+      std::ostringstream err_msg;
+      err_msg << "PrefillPlanInfo::FromVector: vec.size() should be 14, but got " << vec.size();
+      FLASHINFER_ERROR(err_msg.str());
+    }
+    padded_batch_size = vec[0];
+    total_num_rows = vec[1];
+    total_num_rows_offset = vec[2];
+    cta_tile_q = vec[3];
+    request_indices_offset = vec[4];
+    qo_tile_indices_offset = vec[5];
+    kv_tile_indices_offset = vec[6];
+    merge_indptr_offset = vec[7];
+    o_indptr_offset = vec[8];
+    kv_chunk_size_ptr_offset = vec[9];
+    v_offset = vec[10];
+    s_offset = vec[11];
+    block_valid_mask_offset = vec[12];
+    enable_cuda_graph = vec[13];
+    split_kv = vec[14];
+  }
+};
+
+#include <iostream>
+#include <fstream>
+void* loadfromfile(std::string filename) {
+    //std::string filename = "float_workspace_buffer.bin";
+    std::vector<int> data_array;
+    int temp_data;
+    std::ifstream input_file(filename, std::ios::binary);
+    printf("%s", filename);
+    if (!input_file.is_open()) {
+        std::cout << "\nError opening file: " << filename << std::endl;
+        return nullptr;
+    }
+    while (input_file.read(reinterpret_cast<char*>(&temp_data), sizeof(temp_data))) {
+        data_array.push_back(temp_data);
+    }
+    if (input_file.eof()) {
+        //std::cout << "End of file reached." << std::endl;
+    } else if (input_file.fail()) {
+        std::cout << "\nError reading file." << std::endl;
+    }
+    input_file.close();
+    return (void*)(&data_array[0]);
+}
+
+template <typename T>
+T* GetPtrFromBaseOffset(void* base_ptr, int64_t offset) {
+  return reinterpret_cast<T*>(reinterpret_cast<char*>(base_ptr) + offset);
+}
+
+
 void call_it() {
  printf("\nLoad Tensors and Run Prefill here...\n");
 
-  //TestBatchPagedPrefillKernelOneHotCorrectness<half>(false);
+//TestBatchPagedPrefillKernelOneHotCorrectness<half>(false);
+using DTypeQ = half;
+using DTypeKV = half;
+using DTypeO = half;
+using IdType = int32_t;
 
-using Params = BatchPrefillPagedParams<half, half, half, int32_t>;
-Params pM;
+using Params = BatchPrefillPagedParams<DTypeQ, DTypeKV, DTypeO, IdType>;
+Params params;
+
+int mask_mode = 0;
+int layout= 1;
+int window_left = -1;
+float logits_soft_cap= 0.0;
+float sm_scale =  0.08838834764831843;
+float rope_scale =  1.0;
+float rope_theta = 10000.0;
+
+//params.padded_batch_size = 57;
+//params.num_qo_heads = 4;
+//params.paged_kv.num_heads = 4;
+
+std::vector<int64_t> plan_info_vec;
+    const char* filename = "plan_info_vec.txt";
+    FILE* file = fopen(filename, "r");
+    if (file == nullptr) {
+        printf("Error opening file");
+        exit(EXIT_FAILURE);
+    }
+    int num;
+    while (fscanf(file, "%d", &num) == 1) {
+        plan_info_vec.push_back(num);
+    }
+    if (ferror(file)) {
+        printf("Error reading file");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+    fclose(file);
+
+int q_stride_0_ = 512;
+int q_stride_1_ = 128;
+int q_size_0_ = 444;
+int q_size_1_ = 4;
+int q_size_2_ = 128;
+int paged_kv_indptr_size_0_= 13;
+int paged_k_cache_size_1_ = 4;
+int paged_k_cache_size_2_ = 5;
+int lse_size_0_ = 444;
+int lse_size_1 = 4;
+int HEAD_DIM_VO = 128; //from test
+
+
 using AttentionVariant1 = DefaultAttention<true, /*use_sliding_window=*/true, /*use_logits_soft_cap=*/false, /*use_alibi_bias=*/false>;
 AttentionVariant1 A10();
 
-cudaStream_t myStream;
+  PrefillPlanInfo plan_info;
+  plan_info.FromVector(plan_info_vec);
 
-#if 1
+  QKVLayout kv_layout = static_cast<QKVLayout>(layout);
+
+  //auto device = q.device();
+  int64_t batch_size = paged_kv_indptr_size_0_ - 1;
+  int64_t num_qo_heads = q_size_1_;
+  int64_t num_kv_heads, page_size;
+  uint32_t head_dim_qk = q_size_2_;
+  if (kv_layout == QKVLayout::kHND) {
+    num_kv_heads = paged_k_cache_size_1_;
+    page_size = paged_k_cache_size_2_;
+  } else {
+    page_size = paged_k_cache_size_1_;
+    num_kv_heads = paged_k_cache_size_2_;
+  }
+
+  bool maybe_lse = false;
+  if (maybe_lse) {
+    //const auto& lse = *maybe_lse;
+    //TORCH_CHECK(lse_size_0_ == q_size_0_, lse_size_0_, q_size_0_);
+    //TORCH_CHECK(lse_size_1_ == q_size_1_, lse_size_1_, q_size_1_);
+  }
+
+
+   
+  void* float_buffer_ptr = static_cast<void*>(loadfromfile("float_workspace_buffer.bin"));// float_workspace_buffer.data_ptr());
+  void* int_buffer_ptr = static_cast<void*>(loadfromfile("int_workspace_buffer.bin"));// int_workspace_buffer.data_ptr());
+
+  //const MaskMode mask_mode = static_cast<MaskMode>(mask_mode_code);
+  //auto q_scalar_type = Half;//q.scalar_type();
+  //auto kv_scalar_type = Half;//paged_k_cache.scalar_type();
+
+  // get q_stride_n and q_stride_h
+  const auto q_stride_n = q_stride_0_;
+  const auto q_stride_h = q_stride_1_;
+
+  // get kv_cache_strides
+  const int64_t kv_cache_strides[] = {5120, 640, 128, 1}; //from dump //nullptr;
+  //auto k_strides = paged_k_cache.strides();
+  //auto v_strides = paged_v_cache.strides();
+  //TORCH_CHECK(k_strides == v_strides, "k/v strides must be identical");
+  //kv_cache_strides = k_strides.data();
+  //kv_cache_strides = int64_t[5120, 640, 128, 1];// (const int64_t*)loadfromfile("k_strides.bin");
+
+cudaStream_t myStream;
+    cudaStreamCreate(&myStream);
+
+        params.q = static_cast<DTypeQ*>(loadfromfile("q.bin")); //q.data_ptr());
+        paged_kv_t<DTypeKV, IdType> paged_kv(
+            num_kv_heads, page_size, HEAD_DIM_VO, batch_size, kv_layout,
+            static_cast<DTypeKV*>(loadfromfile("paged_k_cache.bin")), //paged_k_cache.data_ptr()),
+            static_cast<DTypeKV*>(loadfromfile("paged_v_cache.bin")), kv_cache_strides, //paged_v_cache.data_ptr()), kv_cache_strides,
+            static_cast<IdType*>(loadfromfile("paged_kv_indices.bin")), // paged_kv_indices.data_ptr()),
+            static_cast<IdType*>(loadfromfile("paged_kv_indptr.bin")), // paged_kv_indptr.data_ptr()),
+            static_cast<IdType*>(loadfromfile("paged_kv_last_page_len.bin"))); // paged_kv_last_page_len.data_ptr()));
+        params.paged_kv = paged_kv;
+        params.q_indptr = static_cast<IdType*>(loadfromfile("qo_indptr.bin"));// qo_indptr.data_ptr());
+        params.o = static_cast<DTypeO*>(loadfromfile("o.bin")); // o.data_ptr());
+
+        params.lse = !maybe_lse ? nullptr : static_cast<float*>(loadfromfile("maybe_lse.bin")); // maybe_lse->data_ptr()) : nullptr;
+        params.num_qo_heads = num_qo_heads;
+        params.group_size = uint_fastdiv(num_qo_heads / paged_kv.num_heads);
+        params.q_stride_n = q_stride_n;
+        params.q_stride_h = q_stride_h;
+        params.window_left = window_left;
+
+        params.request_indices = nullptr;
+        params.qo_tile_indices = nullptr;
+        params.kv_tile_indices = nullptr;
+        params.merge_indptr = nullptr;
+        params.o_indptr = nullptr;
+        params.kv_chunk_size_ptr = nullptr;
+        params.block_valid_mask = nullptr;
+        params.total_num_rows = nullptr;
+        params.max_total_num_rows = 0;
+        params.padded_batch_size = 0;
+        params.partition_kv = false;
+
+        //ADDITIONAL_PARAMS_SETTER
+
+        DTypeO* tmp_v = nullptr;
+        float* tmp_s = nullptr;
+
+        params.request_indices =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.request_indices_offset);
+        params.qo_tile_indices =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.qo_tile_indices_offset);
+        params.kv_tile_indices =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.kv_tile_indices_offset);
+        params.o_indptr = GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.o_indptr_offset);
+        params.kv_chunk_size_ptr =
+            GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.kv_chunk_size_ptr_offset);
+        if (plan_info.split_kv) {
+          params.merge_indptr =
+              GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.merge_indptr_offset);
+          tmp_v = GetPtrFromBaseOffset<DTypeO>(float_buffer_ptr, plan_info.v_offset);
+          tmp_s = GetPtrFromBaseOffset<float>(float_buffer_ptr, plan_info.s_offset);
+          if (plan_info.enable_cuda_graph) {
+            params.block_valid_mask =
+                GetPtrFromBaseOffset<bool>(int_buffer_ptr, plan_info.block_valid_mask_offset);
+          }
+        }
+        params.padded_batch_size = plan_info.padded_batch_size;
+        params.max_total_num_rows = plan_info.total_num_rows;
+        if (plan_info.enable_cuda_graph) {
+          params.total_num_rows =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.total_num_rows_offset);
+        }
+
+        cudaError_t status = cudaSuccess;
+
+        BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0, MaskMode::kCustom, AttentionVariant1, Params>(
+           params, 
+           //half* tmp_v, float* tmp_s,
+           tmp_v, tmp_s, //no kv_partition for now
+           myStream);
+#if 0
+        DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {
+          status = BatchPrefillWithPagedKVCacheDispatched<
+              CTA_TILE_Q, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
+              /*use_fp16_qk_reduction=*/USE_FP16_QK_REDUCTION, MASK_MODE, AttentionVariant,
+              PagedParams>(params, tmp_v, tmp_s, stream);
+        });
+#endif
+
+
+
+#if 0 
 BatchPrefillWithPagedKVCacheDispatched<128, 128, 128, PosEncodingMode::kNone, 0, MaskMode::kCustom, AttentionVariant1, Params>(
-    pM, 
-    //half* tmp_v,
-    NULL, NULL,
-    //float* tmp_s,
+    params, 
+    //half* tmp_v, float* tmp_s,
+    nullptr, nullptr, //no kv_partition for now
     myStream);
 #endif
  printf("\nCompleted...\n");
